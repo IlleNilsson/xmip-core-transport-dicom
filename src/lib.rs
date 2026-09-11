@@ -36,6 +36,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use dimse::Command;
 pub use pdu::{Associate, Pdv};
 use transport::error::{Result, protocol_error};
+use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::wire::MAX_BODY;
 use transport::{Arrived, Directions, Transport};
@@ -44,6 +45,7 @@ use transport::{Arrived, Directions, Transport};
 /// goes under until [`DicomTransport::storing`] names another.
 pub const SECONDARY_CAPTURE: &str = "1.2.840.10008.5.1.4.1.1.7";
 
+#[derive(Clone)]
 pub struct DicomTransport {
     bind: String,
     /// This side's title.
@@ -325,6 +327,51 @@ impl Transport for DicomTransport {
     }
 }
 
+impl DicomTransport {
+    /// Both ends on this machine: an ephemeral local port, the loopback
+    /// timeout on the association, and one title — `XMIP` — storing to
+    /// itself.
+    #[must_use]
+    pub fn loopback() -> Self {
+        Self::new("127.0.0.1:0").timing_out_after(LOOPBACK_TIMEOUT)
+    }
+}
+
+/// A bound SCP waiting for its one association and the store it carries.
+struct Listening {
+    transport: DicomTransport,
+    listener: TcpListener,
+    address: String,
+}
+
+impl FarEnd for Listening {
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn take_one(self: Box<Self>) -> Result<Arrived> {
+        self.transport.accept_one(&self.listener)
+    }
+}
+
+impl Loopback for DicomTransport {
+    fn far_end(&self) -> Result<Box<dyn FarEnd>> {
+        let (listener, address) = self.bind()?;
+        Ok(Box::new(Listening {
+            transport: self.clone(),
+            listener,
+            address,
+        }))
+    }
+
+    /// The near end calls the far end by this side's title, which is what
+    /// the far end answers to.
+    fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
+        self.clone()
+            .send(&format!("dicom://{address}?called={}", self.title), payload)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -349,33 +396,50 @@ mod tests {
             .timing_out_after(secs(2))
     }
 
+    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            ("empty", Vec::new()),
+            ("one byte", vec![0x2a]),
+            ("every byte", (0..=255).collect()),
+            ("nul run", vec![0; 512]),
+            ("high bytes", vec![0xff; 512]),
+            ("crlf storm", b"\r\n".repeat(400)),
+        ]
+    }
+
     #[test]
     fn a_data_set_is_stored_in_fragments_and_acknowledged() {
-        let (scp, listener, address) = scp();
+        let pair = DicomTransport::loopback().titled("ARCHIVE", "MODALITY");
         let long: Vec<u8> = (0..(1usize << 20))
             .map(|at| u8::try_from(at % 251).unwrap_or(0))
             .collect();
-        let sent = long.clone();
-        let sender = std::thread::spawn(move || {
-            let scu = scu();
-            scu.send(&format!("dicom://{address}?called=ARCHIVE"), b"DICM")?;
-            scu.send(&address, &sent)?;
-            scu.reading_pdus_of(64).send(&address, &[])
-        });
-        let first = scp.accept_one(&listener).expect("first");
+        let first = pair.round(b"DICM").expect("first");
         assert_eq!(first.bytes, b"DICM");
         assert!(first.origin_uri.starts_with("dicom://127.0.0.1:"));
         assert!(
             first
                 .origin_uri
-                .contains("?calling=MODALITY&called=ARCHIVE&sop-class=")
+                .contains("?calling=ARCHIVE&called=ARCHIVE&sop-class=")
         );
         assert!(first.origin_uri.contains("&sop-instance=2.25."));
-        let second = scp.accept_one(&listener).expect("second");
+        let second = pair.round(&long).expect("second");
         assert_eq!(second.bytes, long);
-        let third = scp.accept_one(&listener).expect("third");
+        let third = pair.reading_pdus_of(64).round(&[]).expect("third");
         assert!(third.bytes.is_empty());
-        sender.join().expect("thread").expect("three stores");
+    }
+
+    #[test]
+    fn the_loopback_returns_the_edge_payloads_whole() {
+        let pair = DicomTransport::loopback();
+        for (name, bytes) in edge_payloads() {
+            let arrived = pair
+                .round(&bytes)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(arrived.bytes, bytes, "{name}");
+            assert!(arrived.origin_uri.contains("?calling=XMIP&called=XMIP&"));
+        }
+        assert!(pair.ceiling().is_none());
+        assert!(pair.refuses(b"\r\n\0").is_none());
     }
 
     #[test]
