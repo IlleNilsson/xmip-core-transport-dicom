@@ -36,6 +36,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use dimse::Command;
 pub use pdu::{Associate, Pdv};
 use transport::error::{Result, protocol_error};
+use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::wire::MAX_BODY;
@@ -337,31 +338,16 @@ impl DicomTransport {
     }
 }
 
-/// A bound SCP waiting for its one association and the store it carries.
-struct Listening {
-    transport: DicomTransport,
-    listener: TcpListener,
-    address: String,
-}
-
-impl FarEnd for Listening {
-    fn address(&self) -> &str {
-        &self.address
-    }
-
-    fn take_one(self: Box<Self>) -> Result<Arrived> {
-        self.transport.accept_one(&self.listener)
+impl Accepting for DicomTransport {
+    fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
+        self.accept_one(listener)
     }
 }
 
 impl Loopback for DicomTransport {
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening {
-            transport: self.clone(),
-            listener,
-            address,
-        }))
+        Ok(Box::new(Listening::new(self.clone(), listener, address)))
     }
 
     /// The near end calls the far end by this side's title, which is what
@@ -375,6 +361,7 @@ impl Loopback for DicomTransport {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use transport::payload::edge_payloads;
 
     use super::*;
 
@@ -394,17 +381,6 @@ mod tests {
         DicomTransport::new("127.0.0.1:0")
             .titled("MODALITY", "ARCHIVE")
             .timing_out_after(secs(2))
-    }
-
-    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
-        vec![
-            ("empty", Vec::new()),
-            ("one byte", vec![0x2a]),
-            ("every byte", (0..=255).collect()),
-            ("nul run", vec![0; 512]),
-            ("high bytes", vec![0xff; 512]),
-            ("crlf storm", b"\r\n".repeat(400)),
-        ]
     }
 
     #[test]
