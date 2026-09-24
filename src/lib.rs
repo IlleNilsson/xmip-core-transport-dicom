@@ -339,15 +339,14 @@ impl DicomTransport {
 }
 
 impl Accepting for DicomTransport {
-    fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
+    fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
         self.accept_one(listener)
     }
 }
 
 impl Loopback for DicomTransport {
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening::new(self.clone(), listener, address)))
+        Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }
 
     /// The near end calls the far end by this side's title, which is what
