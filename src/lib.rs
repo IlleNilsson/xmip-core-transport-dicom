@@ -38,6 +38,7 @@ pub use dimse::Command;
 use net::MAX_BODY;
 pub use pdu::{Associate, Pdv};
 use transport::error::{Result, protocol_error};
+use transport::kept::Kept;
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
@@ -58,6 +59,8 @@ pub struct DicomTransport {
     sop_class: String,
     max_pdu: u32,
     timeout: Option<Duration>,
+    /// The listener the first receive binds, and every receive takes from.
+    receiving: Kept<TcpListener>,
 }
 
 impl DicomTransport {
@@ -72,6 +75,7 @@ impl DicomTransport {
             sop_class: SECONDARY_CAPTURE.to_string(),
             max_pdu: pdu::DEFAULT_MAX_PDU,
             timeout: None,
+            receiving: Kept::new(),
         }
     }
 
@@ -316,9 +320,11 @@ impl Transport for DicomTransport {
         Directions::BOTH
     }
 
+    /// One association's data set, from the listener the first receive
+    /// bound and kept.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let (listener, _) = self.bind()?;
-        Ok(vec![self.accept_one(&listener)?])
+        let listener = self.receiving.bound(|| self.bind())?;
+        Ok(vec![self.accept_one(listener)?])
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
@@ -379,6 +385,16 @@ mod tests {
         DicomTransport::new("127.0.0.1:0")
             .titled("MODALITY", "ARCHIVE")
             .timing_out_after(secs(2))
+    }
+
+    #[test]
+    fn every_receive_takes_from_the_listener_the_first_bound() {
+        let receiver = DicomTransport::loopback();
+        receiver.receiving.bound(|| receiver.bind()).expect("bound");
+        let address = receiver.receiving.address().expect("address");
+        transport::kept::held_across_receives(&receiver, address, 3, |at, payload| {
+            DicomTransport::loopback().send_to(at, payload)
+        });
     }
 
     #[test]
