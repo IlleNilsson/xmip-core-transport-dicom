@@ -27,6 +27,7 @@
 
 pub mod dimse;
 pub mod pdu;
+mod settings;
 
 use std::io::{BufReader, Read};
 use std::net::{TcpListener, TcpStream};
