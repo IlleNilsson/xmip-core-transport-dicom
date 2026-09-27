@@ -13,6 +13,7 @@
 
 use std::io::{Read, Write};
 
+use transport::ceiling;
 use transport::error::{Result, classify, protocol_error};
 
 /// A-ASSOCIATE-RQ.
@@ -61,11 +62,7 @@ pub fn read(reader: &mut impl Read, max: usize) -> Result<(u8, Vec<u8>)> {
         .read_exact(&mut head)
         .map_err(|e| classify("reading a PDU header", &e))?;
     let length = u32::from_be_bytes([head[2], head[3], head[4], head[5]]) as usize;
-    if length > max {
-        return Err(protocol_error(format!(
-            "a PDU of {length} bytes, over the {max} this side reads"
-        )));
-    }
+    ceiling::within(length, max, "this side reads in one PDU")?;
     let mut body = vec![0u8; length];
     reader
         .read_exact(&mut body)

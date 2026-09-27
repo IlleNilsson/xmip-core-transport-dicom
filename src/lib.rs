@@ -32,16 +32,17 @@ mod settings;
 use std::io::{BufReader, Read};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 pub use dimse::Command;
+use net::MAX_BODY;
 pub use pdu::{Associate, Pdv};
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::wire::MAX_BODY;
 use transport::{Arrived, Directions, Transport};
+use xcore::{IdGenerator, UuidV7Generator};
 
 /// Secondary Capture Image Storage, the SOP class a store of opaque bytes
 /// goes under until [`DicomTransport::storing`] names another.
@@ -300,13 +301,10 @@ fn next_message_id() -> u16 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-/// A SOP instance UID no other store from this process carries.
+/// A SOP instance UID no other store carries: a UUID under the `2.25` arc,
+/// as its integer (PS3.5 section B.2, ISO/IEC 9834-8).
 fn next_instance() -> String {
-    static COUNTER: AtomicU16 = AtomicU16::new(1);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
-    format!("2.25.{nanos}{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+    format!("2.25.{}", UuidV7Generator.next_u128())
 }
 
 impl Transport for DicomTransport {
