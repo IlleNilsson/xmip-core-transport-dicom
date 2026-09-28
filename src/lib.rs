@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 pub use dimse::Command;
-use net::MAX_BODY;
+use net::{MAX_BODY, Target};
 pub use pdu::{Associate, Pdv};
 use transport::error::{Result, protocol_error};
 use transport::kept::Kept;
@@ -179,17 +179,11 @@ impl DicomTransport {
 
     /// Where a send is going: the address, and the title to call.
     fn resolve(&self, target: &str) -> (String, String) {
-        let rest = socket::target("dicom", target).map_or(target, |(authority, _)| authority);
-        match rest.split_once('?') {
-            Some((address, query)) => {
-                let called = query
-                    .split('&')
-                    .find_map(|pair| pair.strip_prefix("called="))
-                    .unwrap_or(&self.called);
-                (address.to_string(), called.to_string())
-            }
-            None => (rest.to_string(), self.called.clone()),
-        }
+        let named = Target::under(&["dicom"], target).unwrap_or_else(|| Target::bare(target));
+        let called = named
+            .query_value("called")
+            .unwrap_or_else(|| self.called.clone());
+        (named.authority().to_string(), called)
     }
 
     /// Open an association with `called` at `address`, store `bytes` as
