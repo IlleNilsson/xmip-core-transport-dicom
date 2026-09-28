@@ -13,7 +13,7 @@
 
 use std::io::{Read, Write};
 
-use transport::ceiling;
+use net::ceiling;
 use transport::error::{Result, classify, protocol_error};
 
 /// A-ASSOCIATE-RQ.
@@ -32,11 +32,11 @@ pub const RELEASE_RP: u8 = 0x06;
 pub const ABORT: u8 = 0x07;
 
 /// The one application context there is.
-pub const APPLICATION_CONTEXT: &str = "1.2.840.10008.3.1.1.1";
+const APPLICATION_CONTEXT: &str = "1.2.840.10008.3.1.1.1";
 /// Implicit VR little endian, the transfer syntax every entity reads.
 pub const IMPLICIT_VR_LE: &str = "1.2.840.10008.1.2";
 /// What this implementation calls itself in the user information.
-pub const IMPLEMENTATION_CLASS: &str = "2.25.314159265358979.1";
+const IMPLEMENTATION_CLASS: &str = "2.25.314159265358979.1";
 /// The largest PDU this side reads unless told otherwise.
 pub const DEFAULT_MAX_PDU: u32 = 16_384;
 

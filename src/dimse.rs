@@ -14,7 +14,8 @@ use crate::pdu::Pdv;
 /// C-STORE-RQ.
 pub const C_STORE_RQ: u16 = 0x0001;
 /// C-STORE-RSP.
-pub const C_STORE_RSP: u16 = 0x8001;
+#[cfg(test)]
+const C_STORE_RSP: u16 = 0x8001;
 /// The status of a store that succeeded.
 pub const SUCCESS: u16 = 0x0000;
 /// The status for a command this side does not perform.
