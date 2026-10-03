@@ -19,29 +19,44 @@
 //! what the archive receives, and reading the elements inside it is a
 //! contract technology's work.
 //!
+//! **How a receive acknowledges.** The SCU waits for the C-STORE-RSP, so it
+//! is answered after the whole receive cycle: status success on
+//! [`Verdict::Accepted`], then the release; on [`Verdict::Refused`] a
+//! failure the SCU does not store again — [`dimse::NOT_AUTHORIZED`]
+//! (`0x0124`, PS3.7 Annex C.5) for a sender not identified or not
+//! permitted, [`dimse::CANNOT_UNDERSTAND`] (`0xC000`, PS3.4 Table B.2-1)
+//! for content refused; [`dimse::OUT_OF_RESOURCES`] (`0xA700`, PS3.4 Table
+//! B.2-1) on [`Verdict::Failed`], which tells the SCU to store again.
+//! An association dropped without either closes unanswered, and the SCU
+//! stores again. The data set is read off the association as the runtime
+//! asks, never gathered whole in memory.
+//!
 //! The origin URI carries what the association and the command knew:
 //! `dicom://peer?calling=MODALITY&called=XMIP&sop-class=1.2.840.10008.5.1.4.1.1.7`
 //! `&sop-instance=2.25.…`.
 //! A target is `dicom://host:104?called=ARCHIVE`, or a bare `host:port`
 //! calling the configured title.
 
+pub mod data_set;
 pub mod dimse;
 pub mod pdu;
 mod settings;
 
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
+use data_set::read_message;
 pub use dimse::Command;
 use net::{MAX_BODY, Target};
 pub use pdu::{Associate, Pdv};
-use transport::error::{Result, protocol_error};
+use transport::error::{Result, TransportError, protocol_error};
 use transport::kept::Kept;
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
+use transport::{Acknowledgement, Refusal, Taken, Verdict};
 use transport::{Arrived, Directions, Transport};
 use xcore::{IdGenerator, UuidV7Generator};
 
@@ -116,7 +131,10 @@ impl DicomTransport {
         socket::bind_tcp(&self.bind)
     }
 
-    /// Accept one association, take its one store and release.
+    /// Accept one association and take its one store. The data set is read
+    /// off the association as the runtime asks; the C-STORE-RSP waits for
+    /// the verdict — success on accepted, then the release; a failure not
+    /// stored again on refused; [`dimse::OUT_OF_RESOURCES`] on failed.
     ///
     /// # Errors
     /// Where the connection broke, the peer is not speaking DICOM
@@ -149,32 +167,43 @@ impl DicomTransport {
             ..offered.clone()
         };
         pdu::write(&mut writer, pdu::ASSOCIATE_AC, &accepted.accept())?;
-        let (command, data_set) = read_message(&mut reader)?;
-        let status = if command.field == dimse::C_STORE_RQ {
-            dimse::SUCCESS
-        } else {
-            dimse::UNRECOGNIZED_OPERATION
+        let (command, data_set) = data_set::read_command(reader)?;
+        let answer = Answer {
+            command: command.clone(),
+            context_id: offered.context_id,
+            max: offered.max_pdu.max(6) as usize,
         };
-        let response = command.response(status).to_bytes();
-        let max = offered.max_pdu.max(6) as usize;
-        for body in dimse::fragments(&response, offered.context_id, true, max) {
-            pdu::write(&mut writer, pdu::P_DATA, &body)?;
-        }
-        if status != dimse::SUCCESS {
+        if command.field != dimse::C_STORE_RQ {
+            answer.respond(&mut writer, dimse::UNRECOGNIZED_OPERATION)?;
             return Err(protocol_error(format!(
                 "a command {:#06x} where a C-STORE was expected",
                 command.field
             )));
         }
-        let (kind, _) = pdu::read(&mut reader, MAX_BODY)?;
-        if kind == pdu::RELEASE_RQ {
-            pdu::write(&mut writer, pdu::RELEASE_RP, &[0; 4])?;
-        }
         let origin = format!(
             "dicom://{peer}?calling={}&called={}&sop-class={}&sop-instance={}",
             offered.calling, offered.called, command.sop_class, command.sop_instance
         );
-        Ok(Arrived::new(origin, data_set))
+        let acknowledgement = Acknowledgement::deferred(move |verdict| match verdict {
+            Verdict::Accepted => {
+                answer.respond(&mut writer, dimse::SUCCESS)?;
+                // The SCU releases once answered; nothing it sent is left
+                // unread, so the release is read straight off the socket.
+                let (kind, _) = pdu::read(&mut writer, MAX_BODY)?;
+                if kind == pdu::RELEASE_RQ {
+                    pdu::write(&mut writer, pdu::RELEASE_RP, &[0; 4])?;
+                }
+                Ok(())
+            }
+            Verdict::Refused(Refusal::Unidentified | Refusal::Forbidden) => {
+                answer.respond(&mut writer, dimse::NOT_AUTHORIZED)
+            }
+            Verdict::Refused(Refusal::Unacceptable) => {
+                answer.respond(&mut writer, dimse::CANNOT_UNDERSTAND)
+            }
+            Verdict::Failed => answer.respond(&mut writer, dimse::OUT_OF_RESOURCES),
+        });
+        Ok(Arrived::new(origin, data_set, acknowledgement))
     }
 
     /// Where a send is going: the address, and the title to call.
@@ -215,10 +244,16 @@ impl DicomTransport {
         }
         let (response, _) = read_message(&mut reader)?;
         if response.status != dimse::SUCCESS {
-            return Err(protocol_error(format!(
+            let said = format!(
                 "the SCP answered the store with status {:#06x}",
                 response.status
-            )));
+            );
+            // Out of resources: the store may succeed when sent again.
+            return Err(if response.status & 0xFF00 == dimse::OUT_OF_RESOURCES {
+                TransportError::retryable(said)
+            } else {
+                protocol_error(said)
+            });
         }
         pdu::write(&mut writer, pdu::RELEASE_RQ, &[0; 4])?;
         let (kind, _) = pdu::read(&mut reader, MAX_BODY)?;
@@ -227,6 +262,25 @@ impl DicomTransport {
                 "{} where the release reply was expected",
                 pdu::name(kind)
             )));
+        }
+        Ok(())
+    }
+}
+
+/// What a C-STORE-RSP is written from: the request it answers, and the
+/// presentation context and PDU size the association agreed.
+struct Answer {
+    command: Command,
+    context_id: u8,
+    max: usize,
+}
+
+impl Answer {
+    /// The response with `status`, in PDUs no longer than the SCU reads.
+    fn respond(&self, writer: &mut TcpStream, status: u16) -> Result<()> {
+        let response = self.command.response(status).to_bytes();
+        for body in dimse::fragments(&response, self.context_id, true, self.max) {
+            pdu::write(writer, pdu::P_DATA, &body)?;
         }
         Ok(())
     }
@@ -257,42 +311,6 @@ fn associated(reader: &mut BufReader<TcpStream>) -> Result<Associate> {
     }
 }
 
-/// One message off the association: the command, and the data set that
-/// follows where the command says one does.
-fn read_message(reader: &mut impl Read) -> Result<(Command, Vec<u8>)> {
-    let mut command_bytes = Vec::new();
-    let mut data_set = Vec::new();
-    let mut command = None;
-    loop {
-        let (kind, body) = pdu::read(reader, MAX_BODY)?;
-        if kind != pdu::P_DATA {
-            return Err(protocol_error(format!(
-                "{} where data was expected",
-                pdu::name(kind)
-            )));
-        }
-        for value in pdu::pdvs(&body)? {
-            if value.command {
-                command_bytes.extend_from_slice(&value.bytes);
-                if value.last {
-                    let read = Command::from_bytes(&command_bytes)?;
-                    if !read.has_data_set {
-                        return Ok((read, data_set));
-                    }
-                    command = Some(read);
-                }
-            } else {
-                data_set.extend_from_slice(&value.bytes);
-                if value.last {
-                    let command =
-                        command.ok_or_else(|| protocol_error("a data set before its command"))?;
-                    return Ok((command, data_set));
-                }
-            }
-        }
-    }
-}
-
 /// A message id no other message from this process carries at once.
 fn next_message_id() -> u16 {
     static COUNTER: AtomicU16 = AtomicU16::new(1);
@@ -314,8 +332,17 @@ impl Transport for DicomTransport {
         Directions::BOTH
     }
 
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Unordered(
+            "each association is its own, and its sender waits for its own response",
+        )
+    }
+
     /// One association's data set, from the listener the first receive
-    /// bound and kept.
+    /// bound and kept, read off the association as the runtime asks. The
+    /// SCU waits for the C-STORE-RSP until the cycle has ended: success on
+    /// accepted, a failure not stored again on refused,
+    /// [`dimse::OUT_OF_RESOURCES`] on failed, so it stores again.
     fn receive(&self) -> Result<Vec<Arrived>> {
         let listener = self.receiving.bound(|| self.bind())?;
         Ok(vec![self.accept_one(listener)?])
@@ -338,8 +365,8 @@ impl DicomTransport {
 }
 
 impl Accepting for DicomTransport {
-    fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
-        self.accept_one(listener)
+    fn take_one(self, listener: &TcpListener) -> Result<Taken> {
+        self.accept_one(listener)?.taken()
     }
 }
 
@@ -358,7 +385,7 @@ impl Loopback for DicomTransport {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::io::{Read, Write};
     use transport::payload::edge_payloads;
 
     use super::*;
@@ -424,6 +451,37 @@ mod tests {
         }
         assert!(pair.ceiling().is_none());
         assert!(pair.refuses(b"\r\n\0").is_none());
+    }
+
+    #[test]
+    fn a_store_is_answered_by_its_verdict_failed_out_of_resources_refused_for_good() {
+        let (scp, listener, address) = scp();
+        let modality = std::thread::spawn(move || {
+            [b"DICM R1", b"DICM R2", b"DICM F1", b"DICM C1"].map(|body| scu().send(&address, body))
+        });
+        let forbidden = scp.accept_one(&listener).expect("the first store");
+        assert!(forbidden.defers(), "the SCU waits for the C-STORE-RSP");
+        forbidden.refused(Refusal::Forbidden).expect("answered");
+        let unacceptable = scp.accept_one(&listener).expect("the second");
+        unacceptable
+            .refused(Refusal::Unacceptable)
+            .expect("answered");
+        scp.accept_one(&listener)
+            .expect("the third")
+            .failed()
+            .expect("answered");
+        let accepted = scp.accept_one(&listener).expect("stored again");
+        assert_eq!(accepted.taken().expect("accepted").bytes, b"DICM C1");
+        let [forbidden, unacceptable, failed, accepted] = modality.join().expect("thread");
+        for (refused, status) in [(forbidden, "0x0124"), (unacceptable, "0xc000")] {
+            let error = refused.expect_err("refused");
+            assert!(!error.retryable, "{error}");
+            assert!(error.message.contains(status), "{error}");
+        }
+        let error = failed.expect_err("failed");
+        assert!(error.retryable, "{error}");
+        assert!(error.message.contains("0xa700"), "{error}");
+        accepted.expect("stored");
     }
 
     #[test]

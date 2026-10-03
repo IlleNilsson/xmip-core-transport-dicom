@@ -20,6 +20,18 @@ const C_STORE_RSP: u16 = 0x8001;
 pub const SUCCESS: u16 = 0x0000;
 /// The status for a command this side does not perform.
 pub const UNRECOGNIZED_OPERATION: u16 = 0x0211;
+/// The status of a store from a sender not identified or not permitted:
+/// `0x0124`, Refused: Not Authorized (PS3.7 Annex C.5, the general
+/// failure statuses), a failure the SCU does not store again.
+pub const NOT_AUTHORIZED: u16 = 0x0124;
+/// The status of a store whose content was refused: `0xC000`, Error:
+/// Cannot Understand (PS3.4 Table B.2-1), a failure the SCU does not store
+/// again.
+pub const CANNOT_UNDERSTAND: u16 = 0xC000;
+/// The status of a store Xmip could not complete: `0xA700`, Refused: Out
+/// of Resources (PS3.4 Table B.2-1), the failure that tells the SCU the
+/// store may succeed when sent again.
+pub const OUT_OF_RESOURCES: u16 = 0xA700;
 /// The data set type that says no data set follows.
 const NO_DATA_SET: u16 = 0x0101;
 const HAS_DATA_SET: u16 = 0x0102;
