@@ -47,10 +47,12 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
+use context::property::{DICOM_CALLING_AE_TITLE, PEER_ADDRESS};
 use data_set::read_message;
 pub use dimse::Command;
 use net::{MAX_BODY, Target};
 pub use pdu::{Associate, Pdv};
+use transport::ArrivalIdentity;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::kept::Kept;
 use transport::listening::{Accepting, Listening};
@@ -203,7 +205,10 @@ impl DicomTransport {
             }
             Verdict::Failed => answer.respond(&mut writer, dimse::OUT_OF_RESOURCES),
         });
-        Ok(Arrived::new(origin, data_set, acknowledgement))
+        let calling = offered.calling.trim().to_string();
+        Ok(Arrived::new(origin, data_set, acknowledgement)
+            .from_peer(peer)
+            .observing(DICOM_CALLING_AE_TITLE, calling))
     }
 
     /// Where a send is going: the address, and the title to call.
@@ -371,6 +376,10 @@ impl Accepting for DicomTransport {
 }
 
 impl Loopback for DicomTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::Named(&[PEER_ADDRESS, DICOM_CALLING_AE_TITLE])
+    }
+
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }
