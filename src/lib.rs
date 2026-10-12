@@ -343,6 +343,10 @@ impl Transport for DicomTransport {
         )
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("the accept waits for an association")
+    }
+
     /// One association's data set, from the listener the first receive
     /// bound and kept, read off the association as the runtime asks. The
     /// SCU waits for the C-STORE-RSP until the cycle has ended: success on
