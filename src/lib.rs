@@ -21,12 +21,15 @@
 //!
 //! **How a receive acknowledges.** The SCU waits for the C-STORE-RSP, so it
 //! is answered after the whole receive cycle: status success on
-//! [`Verdict::Accepted`], then the release; on [`Verdict::Refused`] a
-//! failure the SCU does not store again — [`dimse::NOT_AUTHORIZED`]
-//! (`0x0124`, PS3.7 Annex C.5) for a sender not identified or not
-//! permitted, [`dimse::CANNOT_UNDERSTAND`] (`0xC000`, PS3.4 Table B.2-1)
-//! for content refused; [`dimse::OUT_OF_RESOURCES`] (`0xA700`, PS3.4 Table
-//! B.2-1) on [`Verdict::Failed`], which tells the SCU to store again.
+//! [`transport::Verdict::Accepted`], then the release; on
+//! [`transport::Verdict::Refused`] a failure the SCU does not store again —
+//! [`dimse::NOT_AUTHORIZED`] (`0x0124`, PS3.7 Annex C.5) for a sender not
+//! identified or not permitted, [`dimse::CANNOT_UNDERSTAND`] (`0xC000`,
+//! PS3.4 Table B.2-1) for content refused; [`dimse::OUT_OF_RESOURCES`]
+//! (`0xA700`, PS3.4 Table B.2-1) on [`transport::Verdict::Failed`], which
+//! tells the SCU to store again. Not stored, the association ends through
+//! `transport::socket::finish`, so an unread data set does not reset the
+//! answer away (2026-10-14).
 //! An association dropped without either closes unanswered, and the SCU
 //! stores again. The data set is read off the association as the runtime
 //! asks, never gathered whole in memory.
@@ -37,6 +40,7 @@
 //! A target is `dicom://host:104?called=ARCHIVE`, or a bare `host:port`
 //! calling the configured title.
 
+mod answer;
 pub mod data_set;
 pub mod dimse;
 pub mod pdu;
@@ -58,7 +62,7 @@ use transport::kept::Kept;
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Acknowledgement, Refusal, Taken, Verdict};
+use transport::{Acknowledgement, Taken};
 use transport::{Arrived, Directions, Transport};
 use xcore::{IdGenerator, UuidV7Generator};
 
@@ -170,7 +174,7 @@ impl DicomTransport {
         };
         pdu::write(&mut writer, pdu::ASSOCIATE_AC, &accepted.accept())?;
         let (command, data_set) = data_set::read_command(reader)?;
-        let answer = Answer {
+        let answer = answer::Answer {
             command: command.clone(),
             context_id: offered.context_id,
             max: offered.max_pdu.max(6) as usize,
@@ -186,25 +190,8 @@ impl DicomTransport {
             "dicom://{peer}?calling={}&called={}&sop-class={}&sop-instance={}",
             offered.calling, offered.called, command.sop_class, command.sop_instance
         );
-        let acknowledgement = Acknowledgement::deferred(move |verdict| match verdict {
-            Verdict::Accepted => {
-                answer.respond(&mut writer, dimse::SUCCESS)?;
-                // The SCU releases once answered; nothing it sent is left
-                // unread, so the release is read straight off the socket.
-                let (kind, _) = pdu::read(&mut writer, MAX_BODY)?;
-                if kind == pdu::RELEASE_RQ {
-                    pdu::write(&mut writer, pdu::RELEASE_RP, &[0; 4])?;
-                }
-                Ok(())
-            }
-            Verdict::Refused(Refusal::Unidentified | Refusal::Forbidden) => {
-                answer.respond(&mut writer, dimse::NOT_AUTHORIZED)
-            }
-            Verdict::Refused(Refusal::Unacceptable) => {
-                answer.respond(&mut writer, dimse::CANNOT_UNDERSTAND)
-            }
-            Verdict::Failed => answer.respond(&mut writer, dimse::OUT_OF_RESOURCES),
-        });
+        let acknowledgement =
+            Acknowledgement::deferred(move |verdict| answer.verdict(&mut writer, verdict));
         let calling = offered.calling.trim().to_string();
         Ok(Arrived::new(origin, data_set, acknowledgement)
             .from_peer(peer)
@@ -267,25 +254,6 @@ impl DicomTransport {
                 "{} where the release reply was expected",
                 pdu::name(kind)
             )));
-        }
-        Ok(())
-    }
-}
-
-/// What a C-STORE-RSP is written from: the request it answers, and the
-/// presentation context and PDU size the association agreed.
-struct Answer {
-    command: Command,
-    context_id: u8,
-    max: usize,
-}
-
-impl Answer {
-    /// The response with `status`, in PDUs no longer than the SCU reads.
-    fn respond(&self, writer: &mut TcpStream, status: u16) -> Result<()> {
-        let response = self.command.response(status).to_bytes();
-        for body in dimse::fragments(&response, self.context_id, true, self.max) {
-            pdu::write(writer, pdu::P_DATA, &body)?;
         }
         Ok(())
     }
@@ -399,6 +367,7 @@ impl Loopback for DicomTransport {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
+    use transport::Refusal;
     use transport::payload::edge_payloads;
 
     use super::*;
@@ -449,7 +418,7 @@ mod tests {
         let second = pair.round(&long).expect("second");
         assert_eq!(second.bytes, long);
         let third = pair.reading_pdus_of(64).round(&[]).expect("third");
-        assert!(third.bytes.is_empty());
+        assert_eq!(third.bytes, [] as [u8; 0]);
     }
 
     #[test]
