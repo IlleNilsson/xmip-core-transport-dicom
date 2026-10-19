@@ -320,12 +320,17 @@ impl Transport for DicomTransport {
     /// SCU waits for the C-STORE-RSP until the cycle has ended: success on
     /// accepted, a failure not stored again on refused,
     /// [`dimse::OUT_OF_RESOURCES`] on failed, so it stores again.
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         let listener = self.receiving.bound(|| self.bind())?;
         Ok(vec![self.accept_one(listener)?])
     }
 
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered("one C-STORE carries the whole dataset")
+    }
+
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
         let (address, called) = self.resolve(target);
         self.store(&address, &called, bytes)
     }
