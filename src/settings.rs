@@ -58,6 +58,9 @@ impl Configured for DicomTransport {
         ],
     };
 
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["dicom"];
+
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         let max_pdu = u32::try_from(settings.integer("max_pdu"))
             .map_err(|_| protocol_error("a maximum PDU length out of range"))?;
