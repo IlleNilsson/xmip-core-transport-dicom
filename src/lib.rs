@@ -63,7 +63,7 @@ use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Acknowledgement, Taken};
-use transport::{Arrived, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Transport};
 use xcore::{IdGenerator, UuidV7Generator};
 
 /// Secondary Capture Image Storage, the SOP class a store of opaque bytes
@@ -200,7 +200,7 @@ impl DicomTransport {
 
     /// Where a send is going: the address, and the title to call.
     fn resolve(&self, target: &str) -> (String, String) {
-        let named = Target::under(&["dicom"], target).unwrap_or_else(|| Target::bare(target));
+        let named = Target::under(Self::SCHEMES, target).unwrap_or_else(|| Target::bare(target));
         let called = named
             .query_value("called")
             .unwrap_or_else(|| self.called.clone());
