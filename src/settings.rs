@@ -82,6 +82,12 @@ impl Configured for DicomTransport {
         }
         Ok(transport)
     }
+
+    /// Each SCU's opening on a Receive Location taking at most `turn`.
+    fn turning_within(mut self, turn: std::time::Duration) -> Self {
+        self.receiving = self.receiving.turning_within(turn);
+        self
+    }
 }
 
 #[cfg(test)]

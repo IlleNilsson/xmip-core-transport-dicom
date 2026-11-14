@@ -34,6 +34,12 @@
 //! stores again. The data set is read off the association as the runtime
 //! asks, never gathered whole in memory.
 //!
+//! **An association's opening is one turn** (`association.rs`): the
+//! associations are kept beside the listener (`transport::serving`), and
+//! each opening is taken in a turn the node's `[tuning] receive_turn`
+//! bounds, so an SCU that stops partway is turned away and the next served
+//! (2026-11-14).
+//!
 //! The origin URI carries what the association and the command knew:
 //! `dicom://peer?calling=MODALITY&called=XMIP&sop-class=1.2.840.10008.5.1.4.1.1.7`
 //! `&sop-instance=2.25.…`.
@@ -41,6 +47,7 @@
 //! calling the configured title.
 
 mod answer;
+mod association;
 pub mod data_set;
 pub mod dimse;
 pub mod pdu;
@@ -51,18 +58,20 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
+use association::Association;
 use context::property::{DICOM_CALLING_AE_TITLE, PEER_ADDRESS};
 use data_set::read_message;
 pub use dimse::Command;
 use net::{MAX_BODY, Target};
 pub use pdu::{Associate, Pdv};
 use transport::ArrivalIdentity;
+use transport::Taken;
+use transport::deadline::Within;
 use transport::error::{Result, TransportError, protocol_error};
-use transport::kept::Kept;
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+use transport::serving::{Serving, Turn};
 use transport::socket;
-use transport::{Acknowledgement, Taken};
 use transport::{Arrived, Configured, Directions, Transport};
 use xcore::{IdGenerator, UuidV7Generator};
 
@@ -80,8 +89,9 @@ pub struct DicomTransport {
     sop_class: String,
     max_pdu: u32,
     timeout: Option<Duration>,
-    /// The listener the first receive binds, and every receive takes from.
-    receiving: Kept<TcpListener>,
+    /// The listener the first receive binds, and the associations opened
+    /// on it, each taken in its own turn.
+    receiving: Serving<Association>,
 }
 
 impl DicomTransport {
@@ -96,7 +106,7 @@ impl DicomTransport {
             sop_class: SECONDARY_CAPTURE.to_string(),
             max_pdu: pdu::DEFAULT_MAX_PDU,
             timeout: None,
-            receiving: Kept::new(),
+            receiving: Serving::new(),
         }
     }
 
@@ -137,65 +147,23 @@ impl DicomTransport {
         socket::bind_tcp(&self.bind)
     }
 
-    /// Accept one association and take its one store. The data set is read
-    /// off the association as the runtime asks; the C-STORE-RSP waits for
-    /// the verdict — success on accepted, then the release; a failure not
-    /// stored again on refused; [`dimse::OUT_OF_RESOURCES`] on failed.
+    /// Accept one association on an already-bound listener and take its one
+    /// store, as a far end does: its opening as a Receive Location's turn
+    /// takes it ([`Self::opened`]), the data set read off the association
+    /// as the runtime asks.
     ///
     /// # Errors
-    /// Where the connection broke, the peer is not speaking DICOM
-    /// (aborted), called another title (rejected), or sent a command
-    /// other than C-STORE (answered with the status that says so).
+    /// Where the connection broke or closed before a word, or as
+    /// [`Self::opened`].
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Arrived> {
         let (stream, peer) = socket::accept_tcp(listener, self.timeout)?;
-        let (mut reader, mut writer) = socket::split(stream)?;
-        let (kind, body) = pdu::read(&mut reader, MAX_BODY)?;
-        if kind != pdu::ASSOCIATE_RQ {
-            pdu::write(&mut writer, pdu::ABORT, &pdu::abort())?;
-            return Err(protocol_error(format!(
-                "{} where an association was expected",
-                pdu::name(kind)
-            )));
+        let mut association = Association::new(Within::new(stream), peer)?;
+        match self.opened(&mut association)? {
+            Turn::Taken(arrived) | Turn::Last(arrived) => Ok(arrived),
+            Turn::Nothing | Turn::Closed => {
+                Err(protocol_error("an SCU that closed before its association"))
+            }
         }
-        let offered = Associate::from_bytes(&body)?;
-        if offered.called != self.title {
-            let reason = pdu::reject(pdu::CALLED_AE_NOT_RECOGNIZED);
-            pdu::write(&mut writer, pdu::ASSOCIATE_RJ, &reason)?;
-            return Err(protocol_error(format!(
-                "an association for {}, and this entity is {}",
-                offered.called, self.title
-            )));
-        }
-        let accepted = Associate {
-            abstract_syntax: String::new(),
-            result: 0,
-            max_pdu: self.max_pdu,
-            ..offered.clone()
-        };
-        pdu::write(&mut writer, pdu::ASSOCIATE_AC, &accepted.accept())?;
-        let (command, data_set) = data_set::read_command(reader)?;
-        let answer = answer::Answer {
-            command: command.clone(),
-            context_id: offered.context_id,
-            max: offered.max_pdu.max(6) as usize,
-        };
-        if command.field != dimse::C_STORE_RQ {
-            answer.respond(&mut writer, dimse::UNRECOGNIZED_OPERATION)?;
-            return Err(protocol_error(format!(
-                "a command {:#06x} where a C-STORE was expected",
-                command.field
-            )));
-        }
-        let origin = format!(
-            "dicom://{peer}?calling={}&called={}&sop-class={}&sop-instance={}",
-            offered.calling, offered.called, command.sop_class, command.sop_instance
-        );
-        let acknowledgement =
-            Acknowledgement::deferred(move |verdict| answer.verdict(&mut writer, verdict));
-        let calling = offered.calling.trim().to_string();
-        Ok(Arrived::new(origin, data_set, acknowledgement)
-            .from_peer(peer)
-            .observing(DICOM_CALLING_AE_TITLE, calling))
     }
 
     /// Where a send is going: the address, and the title to call.
@@ -315,14 +283,24 @@ impl Transport for DicomTransport {
         transport::Waiting::Waits("the accept waits for an association")
     }
 
-    /// One association's data set, from the listener the first receive
-    /// bound and kept, read off the association as the runtime asks. The
-    /// SCU waits for the C-STORE-RSP until the cycle has ended: success on
-    /// accepted, a failure not stored again on refused,
-    /// [`dimse::OUT_OF_RESOURCES`] on failed, so it stores again.
+    /// The SCUs turned away at their own association (`transport::serving`).
+    fn turned_away(&self) -> transport::Turned {
+        self.receiving.turned_away()
+    }
+
+    /// The data set of whichever association opens first, from the
+    /// listener the first receive bound and kept, read off the association
+    /// as the runtime asks. The SCU waits for the C-STORE-RSP until the
+    /// cycle has ended: success on accepted, a failure not stored again on
+    /// refused, [`dimse::OUT_OF_RESOURCES`] on failed, so it stores again.
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
-        let listener = self.receiving.bound(|| self.bind())?;
-        Ok(vec![self.accept_one(listener)?])
+        let arrived = self.receiving.next(
+            || self.bind(),
+            self.timeout,
+            Association::new,
+            |association| self.opened(association),
+        )?;
+        Ok(vec![arrived])
     }
 
     fn sending(&self) -> transport::Sending {
@@ -469,6 +447,42 @@ mod tests {
         assert!(error.retryable, "{error}");
         assert!(error.message.contains("0xa700"), "{error}");
         accepted.expect("stored");
+    }
+
+    #[test]
+    fn an_scu_that_stops_partway_is_cut_at_its_turn_and_the_next_is_served() {
+        // Until 2026-11-14 it held the Location for as long as a read
+        // waits, two seconds here, and for good where none is set.
+        let turn = Duration::from_millis(200);
+        let receiver = DicomTransport::new("127.0.0.1:0")
+            .titled("ARCHIVE", "MODALITY")
+            .timing_out_after(secs(2))
+            .turning_within(turn);
+        let address = receiver.receiving.bound(|| receiver.bind()).expect("bound");
+        let address = address.to_string();
+        let mut stopped = std::net::TcpStream::connect(&address).expect("connect");
+        let from = stopped.local_addr().expect("its address");
+        // A request's header promising 68 octets, and two of them.
+        let half = [pdu::ASSOCIATE_RQ, 0, 0, 0, 0, 68, 0, 1];
+        stopped.write_all(&half).expect("half a request");
+        let at = address.clone();
+        let modality = std::thread::spawn(move || scu().send(&at, b"DICM after"));
+        let began = std::time::Instant::now();
+        let arrived = receiver.receive_up_to(1).expect("the next SCU");
+        let took = began.elapsed();
+        assert!(
+            took >= turn,
+            "served after {took:?}, inside the other's turn"
+        );
+        assert!(took < Duration::from_millis(1500), "served after {took:?}");
+        let taken = arrived.into_iter().next().expect("one").taken();
+        assert_eq!(taken.expect("stored").bytes, b"DICM after");
+        modality.join().expect("thread").expect("acknowledged");
+        let turned = receiver.turned_away();
+        assert_eq!(turned.callers.len(), 1, "{turned:?}");
+        assert_eq!(turned.callers[0].peer, from);
+        assert!(turned.callers[0].why.message.contains("turn"), "{turned:?}");
+        drop(stopped);
     }
 
     #[test]
