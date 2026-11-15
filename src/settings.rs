@@ -47,19 +47,21 @@ impl Configured for DicomTransport {
                 meaning: "The longest PDU read, in bytes, and said so when associating.",
                 applies: Applies::Both,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a peer that stops mid-association is waited on; unbounded \
-                          when left out.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long a peer that stops mid-association is waited on; unbounded \
+                 when left out.",
+            ),
         ],
     };
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["dicom"];
+
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
 
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         let max_pdu = u32::try_from(settings.integer("max_pdu"))
@@ -76,9 +78,6 @@ impl Configured for DicomTransport {
         transport = transport.titled(&title, &called);
         if let Some(sop_class) = settings.optional_text("sop_class") {
             transport = transport.storing(sop_class);
-        }
-        if let Some(timeout) = settings.optional_duration("timeout") {
-            transport = transport.timing_out_after(timeout);
         }
         Ok(transport)
     }
