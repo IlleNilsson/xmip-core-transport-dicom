@@ -132,13 +132,6 @@ impl DicomTransport {
         self
     }
 
-    /// Give up on a peer that stops mid-association.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     /// Bind as the SCP and report the address actually assigned.
     ///
     /// # Errors
