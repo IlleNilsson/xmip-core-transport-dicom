@@ -89,7 +89,7 @@ pub struct DicomTransport {
     sop_class: String,
     max_pdu: u32,
     timeout: Option<Duration>,
-    /// The listener the first receive binds, and the associations opened
+    /// The listener its open binds, and the associations opened
     /// on it, each taken in its own turn.
     receiving: Serving<Association>,
 }
@@ -282,17 +282,16 @@ impl Transport for DicomTransport {
     }
 
     /// The data set of whichever association opens first, from the
-    /// listener the first receive bound and kept, read off the association
+    /// listener its open bound and kept, read off the association
     /// as the runtime asks. The SCU waits for the C-STORE-RSP until the
     /// cycle has ended: success on accepted, a failure not stored again on
     /// refused, [`dimse::OUT_OF_RESOURCES`] on failed, so it stores again.
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
-        let arrived = self.receiving.next(
-            || self.bind(),
-            self.timeout,
-            Association::new,
-            |association| self.opened(association),
-        )?;
+        let arrived = self
+            .receiving
+            .next(self.timeout, Association::new, |association| {
+                self.opened(association)
+            })?;
         Ok(vec![arrived])
     }
 
