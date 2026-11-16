@@ -93,6 +93,12 @@ impl Configured for DicomTransport {
         self.receiving = self.receiving.timed_by(clock);
         self
     }
+
+    /// The listener every receive takes from, bound where a Receive
+    /// Location listens for SCUs.
+    fn listening(&self) -> Result<Option<&str>> {
+        self.receiving.bound(|| self.bind()).map(Some)
+    }
 }
 
 #[cfg(test)]
