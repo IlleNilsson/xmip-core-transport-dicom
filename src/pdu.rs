@@ -37,8 +37,6 @@ const APPLICATION_CONTEXT: &str = "1.2.840.10008.3.1.1.1";
 pub const IMPLICIT_VR_LE: &str = "1.2.840.10008.1.2";
 /// What this implementation calls itself in the user information.
 const IMPLEMENTATION_CLASS: &str = "2.25.314159265358979.1";
-/// The largest PDU this side reads unless told otherwise.
-pub const DEFAULT_MAX_PDU: u32 = 16_384;
 
 /// The rejection reason for a called title this side does not answer to.
 pub const CALLED_AE_NOT_RECOGNIZED: u8 = 7;
@@ -338,6 +336,7 @@ fn title(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::declaration::DEFAULT_MAX_PDU;
 
     fn offered() -> Associate {
         Associate {

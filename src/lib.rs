@@ -45,40 +45,65 @@
 //! `&sop-instance=2.25.…`.
 //! A target is `dicom://host:104?called=ARCHIVE`, or a bare `host:port`
 //! calling the configured title.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature: what the surfaces'
+//! library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 mod answer;
+#[cfg(feature = "default")]
 mod association;
+#[cfg(feature = "default")]
 pub mod data_set;
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 pub mod dimse;
+#[cfg(feature = "default")]
 pub mod pdu;
+#[cfg(feature = "default")]
 mod settings;
 
-use std::io::BufReader;
-use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::Duration;
+#[cfg(feature = "default")]
+use std::{
+    io::BufReader,
+    net::{TcpListener, TcpStream},
+    sync::atomic::{AtomicU16, Ordering},
+    time::Duration,
+};
 
+#[cfg(feature = "default")]
 use association::Association;
+#[cfg(feature = "default")]
 use context::property::{DICOM_CALLING_AE_TITLE, PEER_ADDRESS};
+#[cfg(feature = "default")]
 use data_set::read_message;
+#[cfg(feature = "default")]
+use declaration::{DEFAULT_MAX_PDU, SECONDARY_CAPTURE};
+#[cfg(feature = "default")]
 pub use dimse::Command;
+#[cfg(feature = "default")]
 use net::{MAX_BODY, Target};
+#[cfg(feature = "default")]
 pub use pdu::{Associate, Pdv};
-use transport::ArrivalIdentity;
-use transport::Taken;
-use transport::deadline::Within;
+#[cfg(feature = "default")]
 use transport::error::{Result, TransportError, protocol_error};
+#[cfg(feature = "default")]
 use transport::listening::{Accepting, Listening};
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+#[cfg(feature = "default")]
 use transport::serving::{Serving, Turn};
-use transport::socket;
-use transport::{Arrived, Configured, Directions, Transport};
+#[cfg(feature = "default")]
+use transport::{
+    ArrivalIdentity, Arrived, Configured, Directions, Taken, Transport, deadline::Within, socket,
+};
+#[cfg(feature = "default")]
 use xcore::{IdGenerator, UuidV7Generator};
 
-/// Secondary Capture Image Storage, the SOP class a store of opaque bytes
-/// goes under until [`DicomTransport::storing`] names another.
-pub const SECONDARY_CAPTURE: &str = "1.2.840.10008.5.1.4.1.1.7";
-
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct DicomTransport {
     bind: String,
@@ -94,6 +119,7 @@ pub struct DicomTransport {
     receiving: Serving<Association>,
 }
 
+#[cfg(feature = "default")]
 impl DicomTransport {
     /// Listen at `bind`; `0.0.0.0:104` is the standard port. This side is
     /// `XMIP` and calls `ANY-SCP` until [`Self::titled`].
@@ -104,7 +130,7 @@ impl DicomTransport {
             title: "XMIP".to_string(),
             called: "ANY-SCP".to_string(),
             sop_class: SECONDARY_CAPTURE.to_string(),
-            max_pdu: pdu::DEFAULT_MAX_PDU,
+            max_pdu: DEFAULT_MAX_PDU,
             timeout: None,
             receiving: Serving::new(),
         }
@@ -221,6 +247,7 @@ impl DicomTransport {
 }
 
 /// The acceptance the far end answered the request with.
+#[cfg(feature = "default")]
 fn associated(reader: &mut BufReader<TcpStream>) -> Result<Associate> {
     let (kind, body) = pdu::read(reader, MAX_BODY)?;
     match kind {
@@ -246,6 +273,7 @@ fn associated(reader: &mut BufReader<TcpStream>) -> Result<Associate> {
 }
 
 /// A message id no other message from this process carries at once.
+#[cfg(feature = "default")]
 fn next_message_id() -> u16 {
     static COUNTER: AtomicU16 = AtomicU16::new(1);
     COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -253,10 +281,12 @@ fn next_message_id() -> u16 {
 
 /// A SOP instance UID no other store carries: a UUID under the `2.25` arc,
 /// as its integer (PS3.5 section B.2, ISO/IEC 9834-8).
+#[cfg(feature = "default")]
 fn next_instance() -> String {
     format!("2.25.{}", UuidV7Generator.next_u128())
 }
 
+#[cfg(feature = "default")]
 impl Transport for DicomTransport {
     fn name(&self) -> &'static str {
         "dicom"
@@ -306,6 +336,7 @@ impl Transport for DicomTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl DicomTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout on the association, and one title — `XMIP` — storing to
@@ -316,12 +347,14 @@ impl DicomTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Accepting for DicomTransport {
     fn take_one(self, listener: &TcpListener) -> Result<Taken> {
         self.accept_one(listener)?.taken()
     }
 }
 
+#[cfg(feature = "default")]
 impl Loopback for DicomTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::Named(&[PEER_ADDRESS, DICOM_CALLING_AE_TITLE])
