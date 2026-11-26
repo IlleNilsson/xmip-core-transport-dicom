@@ -32,10 +32,10 @@ default to, `SECONDARY_CAPTURE` and `DEFAULT_MAX_PDU`, are there too, and
 the code reads them from there. Built with its `declaration` feature alone
 (`--no-default-features --features declaration`), the crate is those and
 nothing more: its code and every crate the code is built on are behind the
-default feature. So the library the surfaces load can carry it without the
-code, for the language server and the desktop to suggest and check a DICOM
-Location's settings though no node in their process loaded the technology,
-once the gathering crate of open problem 48 links it.
+default feature. So the library the surfaces load carries it without the
+code, through the gathering crate xmip-core-declaration (open problem 48),
+and the language server and the desktop suggest and check a DICOM Location's
+settings though no node in their process loaded the technology.
 `test/Declaration.Test.ps1` in the estate holds that the declaration builds
 nothing the transport capability does not.
 
